@@ -7,6 +7,14 @@
         "excludedTypes": "Request"
       },
       "enableLiveMetricsFilters": true
+    },
+    "logLevel": {
+      "default": "Information",
+      "Function": "Information",
+      "Host.Results": "Information",
+      "Host.Aggregator": "Information",
+      "Microsoft": "Warning",
+      "Azure": "Error"
     }
   },
   "concurrency": {

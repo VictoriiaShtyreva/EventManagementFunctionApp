@@ -38,10 +38,7 @@ namespace EventManagementFunctionApp
             ServiceBusReceivedMessage message,
             ServiceBusMessageActions messageActions)
         {
-            _logger.LogInformation("Message ID: {id}", message.MessageId);
-            _logger.LogInformation("Message Body: {body}", message.Body);
-            _logger.LogInformation("Message Content-Type: {contentType}", message.ContentType);
-
+            _logger.LogInformation("Message ID: {MessageId}, Body: {Body}, Content-Type: {ContentType}", message.MessageId, message.Body, message.ContentType);
             var registrationDto = System.Text.Json.JsonSerializer.Deserialize<EventRegistrationDto>(message.Body.ToString());
 
             try
@@ -49,23 +46,23 @@ namespace EventManagementFunctionApp
                 if (registrationDto?.Action == "Register")
                 {
                     await RegisterEventAsync(registrationDto.EventId!, registrationDto.UserId!);
-                    _logger.LogInformation($"User {registrationDto.UserId} registered for event {registrationDto.EventId} successfully");
                     var userPrincipalName = await GetUserPrincipalNameAsync(registrationDto.UserId!);
                     await SendEmailAsync(userPrincipalName, "Registration Confirmation", "You have successfully registered for the event.");
+                    _logger.LogInformation("Action: Register, UserId: {UserId}, EventId: {EventId}", registrationDto.UserId, registrationDto.EventId);
                 }
                 else if (registrationDto?.Action == "Unregister")
                 {
                     await UnregisterEventAsync(registrationDto.EventId!, registrationDto.UserId!);
-                    _logger.LogInformation($"User {registrationDto.UserId} unregistered for event {registrationDto.EventId} successfully");
                     var userPrincipalName = await GetUserPrincipalNameAsync(registrationDto.UserId!);
                     await SendEmailAsync(userPrincipalName, "Unregistration Confirmation", "You have successfully unregistered from the event.");
+                    _logger.LogInformation("Action: Unregister, UserId: {UserId}, EventId: {EventId}", registrationDto.UserId, registrationDto.EventId);
                 }
 
                 await messageActions.CompleteMessageAsync(message);
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Error processing message: {ex.Message}");
+                _logger.LogError("Error processing message: {ErrorMessage}", ex.Message);
             }
         }
 
@@ -88,7 +85,7 @@ namespace EventManagementFunctionApp
                         }
 
                         var parameters = new { EventId = eventGuid, UserId = userId };
-                        var insertRegistrationQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\") VALUES (@EventId, @UserId)";
+                        var insertRegistrationQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\", \"Action\") VALUES (@EventId, @UserId, 'Register')";
 
                         await connection.ExecuteAsync(insertRegistrationQuery, parameters, transaction);
 
@@ -97,7 +94,7 @@ namespace EventManagementFunctionApp
                     catch (Exception ex)
                     {
                         transaction.Rollback();
-                        _logger.LogError($"Error during registration: {ex.Message}");
+                        _logger.LogError("Error during registration: {ErrorMessage}", ex.Message);
                         throw;
                     }
                 }
@@ -113,15 +110,19 @@ namespace EventManagementFunctionApp
                 {
                     try
                     {
+                        var parameters = new { EventId = eventId, UserId = userId };
                         var deleteRegistrationQuery = "DELETE FROM \"EventRegistrations\" WHERE \"EventId\" = @EventId AND \"UserId\" = @UserId";
-                        await connection.ExecuteAsync(deleteRegistrationQuery, new { EventId = eventId, UserId = userId }, transaction);
+                        await connection.ExecuteAsync(deleteRegistrationQuery, parameters, transaction);
+
+                        var insertUnregisterActionQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\", \"Action\") VALUES (@EventId, @UserId, 'Unregister')";
+                        await connection.ExecuteAsync(insertUnregisterActionQuery, parameters, transaction);
 
                         transaction.Commit();
                     }
                     catch (Exception ex)
                     {
                         transaction.Rollback();
-                        _logger.LogError($"Error during unregistration: {ex.Message}");
+                        _logger.LogError("Error during unregistration: {ErrorMessage}", ex.Message);
                         throw;
                     }
                 }
@@ -168,11 +169,18 @@ namespace EventManagementFunctionApp
                 SaveToSentItems = false
             };
 
-            await _graphClient.Users[_fromEmail]
-                .SendMail
-                .PostAsync(sendMailPostRequestBody);
+            try
+            {
+                await _graphClient.Users[_fromEmail]
+                    .SendMail
+                    .PostAsync(sendMailPostRequestBody);
 
-            _logger.LogInformation($"Email sent to {userMail}");
+                _logger.LogInformation("Email sent to {UserMail}", userMail);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("Failed to send email to {UserMail}. Error: {ErrorMessage}", userMail, ex.Message);
+            }
         }
 
         public class EventRegistrationDto
