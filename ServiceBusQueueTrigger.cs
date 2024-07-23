@@ -92,8 +92,6 @@ namespace EventManagementFunctionApp
 
                         await connection.ExecuteAsync(insertRegistrationQuery, parameters, transaction);
 
-                        var updateEventQuery = "UPDATE \"Events\" SET \"RegisteredCount\" = \"RegisteredCount\" + 1 WHERE \"Id\" = @EventId";
-                        await connection.ExecuteAsync(updateEventQuery, new { EventId = eventGuid }, transaction);
                         transaction.Commit();
                     }
                     catch (Exception ex)
@@ -116,9 +114,7 @@ namespace EventManagementFunctionApp
                     try
                     {
                         var deleteRegistrationQuery = "DELETE FROM \"EventRegistrations\" WHERE \"EventId\" = @EventId AND \"UserId\" = @UserId";
-                        var result = await connection.ExecuteAsync(deleteRegistrationQuery, new { EventId = eventId, UserId = userId }, transaction);
-
-                        _logger.LogInformation($"Successfully deleted registration for User {userId} from Event {eventId}. Event count decremented.");
+                        await connection.ExecuteAsync(deleteRegistrationQuery, new { EventId = eventId, UserId = userId }, transaction);
 
                         transaction.Commit();
                     }
