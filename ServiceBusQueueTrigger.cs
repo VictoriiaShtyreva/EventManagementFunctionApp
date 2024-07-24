@@ -5,8 +5,9 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Graph;
-using Microsoft.Graph.Models;
 using Npgsql;
+using SendGrid;
+using SendGrid.Helpers.Mail;
 
 namespace EventManagementFunctionApp
 {
@@ -16,6 +17,7 @@ namespace EventManagementFunctionApp
         private readonly string? _connectionString;
         private readonly GraphServiceClient _graphClient;
         private readonly string? _fromEmail;
+        private readonly string? _sendGridApiKey;
 
         public ServiceBusQueueTrigger(ILogger<ServiceBusQueueTrigger> logger, IConfiguration configuration)
         {
@@ -25,6 +27,8 @@ namespace EventManagementFunctionApp
             var clientId = configuration["GraphClientId"];
             var tenantId = configuration["GraphTenantId"];
             var clientSecret = configuration["GraphClientSecret"];
+
+            _sendGridApiKey = configuration["SendGridApiKey"];
             _fromEmail = configuration["FromEmail"];
 
             var clientSecretCredential = new ClientSecretCredential(tenantId, clientId, clientSecret);
@@ -45,16 +49,16 @@ namespace EventManagementFunctionApp
             {
                 if (registrationDto?.Action == "Register")
                 {
-                    await RegisterEventAsync(registrationDto.EventId!, registrationDto.UserId!);
-                    var userPrincipalName = await GetUserPrincipalNameAsync(registrationDto.UserId!);
-                    await SendEmailAsync(userPrincipalName, "Registration Confirmation", "You have successfully registered for the event.");
+                    await RegisterEventAsync(registrationDto.EventId.ToString()!, registrationDto.UserId!);
+                    var userEmail = await GetUserPrincipalNameAsync(registrationDto.UserId!);
+                    await SendEmailAsync(userEmail, "Registration Confirmation", "You have successfully registered for the event.");
                     _logger.LogInformation("Action: Register, UserId: {UserId}, EventId: {EventId}", registrationDto.UserId, registrationDto.EventId);
                 }
                 else if (registrationDto?.Action == "Unregister")
                 {
-                    await UnregisterEventAsync(registrationDto.EventId!, registrationDto.UserId!);
-                    var userPrincipalName = await GetUserPrincipalNameAsync(registrationDto.UserId!);
-                    await SendEmailAsync(userPrincipalName, "Unregistration Confirmation", "You have successfully unregistered from the event.");
+                    await UnregisterEventAsync(registrationDto.EventId.ToString()!, registrationDto.UserId!);
+                    var userEmail = await GetUserPrincipalNameAsync(registrationDto.UserId!);
+                    await SendEmailAsync(userEmail, "Unregistration Confirmation", "You have successfully unregistered from the event.");
                     _logger.LogInformation("Action: Unregister, UserId: {UserId}, EventId: {EventId}", registrationDto.UserId, registrationDto.EventId);
                 }
 
@@ -77,13 +81,7 @@ namespace EventManagementFunctionApp
                     {
                         var eventGuid = Guid.Parse(eventId);
                         var eventQuery = "SELECT * FROM \"Events\" WHERE \"Id\" = @EventId FOR UPDATE";
-                        var eventDetails = await connection.QuerySingleOrDefaultAsync(eventQuery, new { EventId = eventGuid }, transaction);
-
-                        if (eventDetails == null)
-                        {
-                            throw new Exception("Event not found.");
-                        }
-
+                        var eventDetails = await connection.QuerySingleOrDefaultAsync(eventQuery, new { EventId = eventGuid }, transaction) ?? throw new Exception("Event not found.");
                         var parameters = new { EventId = eventGuid, UserId = userId };
                         var insertRegistrationQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\", \"Action\") VALUES (@EventId, @UserId, 'Register')";
 
@@ -110,14 +108,34 @@ namespace EventManagementFunctionApp
                 {
                     try
                     {
-                        var parameters = new { EventId = eventId, UserId = userId };
-                        var deleteRegistrationQuery = "DELETE FROM \"EventRegistrations\" WHERE \"EventId\" = @EventId AND \"UserId\" = @UserId";
-                        await connection.ExecuteAsync(deleteRegistrationQuery, parameters, transaction);
+                        var eventGuid = Guid.Parse(eventId);
+                        var parameters = new { EventId = eventGuid, UserId = userId };
 
-                        var insertUnregisterActionQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\", \"Action\") VALUES (@EventId, @UserId, 'Unregister')";
-                        await connection.ExecuteAsync(insertUnregisterActionQuery, parameters, transaction);
+                        _logger.LogInformation("Checking if registration exists for EventId: {EventId} and UserId: {UserId}", eventGuid, userId);
+
+                        // Check if the registration already exists
+                        var checkRegistrationQuery = "SELECT * FROM \"EventRegistrations\" WHERE \"EventId\" = @EventId AND \"UserId\" = @UserId";
+                        var registration = await connection.QuerySingleOrDefaultAsync(checkRegistrationQuery, parameters, transaction);
+
+                        if (registration != null)
+                        {
+                            _logger.LogInformation("Registration found for EventId: {EventId} and UserId: {UserId}, updating action to 'Unregister'", eventGuid, userId);
+
+                            // If registration exists, update the action to 'Unregister'
+                            var updateRegistrationQuery = "UPDATE \"EventRegistrations\" SET \"Action\" = 'Unregister' WHERE \"EventId\" = @EventId AND \"UserId\" = @UserId";
+                            await connection.ExecuteAsync(updateRegistrationQuery, parameters, transaction);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("No existing registration found for EventId: {EventId} and UserId: {UserId}, inserting 'Unregister' action", eventGuid, userId);
+
+                            // If registration does not exist, insert the unregister action
+                            var insertUnregisterActionQuery = "INSERT INTO \"EventRegistrations\" (\"EventId\", \"UserId\", \"Action\") VALUES (@EventId, @UserId, 'Unregister')";
+                            await connection.ExecuteAsync(insertUnregisterActionQuery, parameters, transaction);
+                        }
 
                         transaction.Commit();
+                        _logger.LogInformation("Unregistration process completed for EventId: {EventId} and UserId: {UserId}", eventGuid, userId);
                     }
                     catch (Exception ex)
                     {
@@ -143,49 +161,34 @@ namespace EventManagementFunctionApp
 
         private async Task SendEmailAsync(string userMail, string subject, string message)
         {
-            var emailMessage = new Message
-            {
-                Subject = subject,
-                Body = new ItemBody
-                {
-                    ContentType = BodyType.Html,
-                    Content = $"<strong>{message}</strong>"
-                },
-                ToRecipients = new List<Recipient>
-        {
-            new Recipient
-            {
-                EmailAddress = new EmailAddress
-                {
-                    Address = userMail
-                }
-            }
-        }
-            };
-
-            var sendMailPostRequestBody = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
-            {
-                Message = emailMessage,
-                SaveToSentItems = false
-            };
+            var client = new SendGridClient(_sendGridApiKey);
+            var from = new EmailAddress(_fromEmail, "Event Management");
+            var to = new EmailAddress(userMail);
+            var plainTextContent = message;
+            var htmlContent = $"<html><body>{message}</body></html>";
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, plainTextContent, htmlContent);
 
             try
             {
-                await _graphClient.Users[_fromEmail]
-                    .SendMail
-                    .PostAsync(sendMailPostRequestBody);
-
-                _logger.LogInformation("Email sent to {UserMail}", userMail);
+                var response = await client.SendEmailAsync(msg);
+                if (response.StatusCode == System.Net.HttpStatusCode.OK || response.StatusCode == System.Net.HttpStatusCode.Accepted)
+                {
+                    _logger.LogInformation("Email sent to {UserEmail}", userMail);
+                }
+                else
+                {
+                    _logger.LogError("Failed to send email to {UserEmail}. StatusCode: {StatusCode}", userMail, response.StatusCode);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError("Failed to send email to {UserMail}. Error: {ErrorMessage}", userMail, ex.Message);
+                _logger.LogError("Failed to send email to {UserEmail}. Error: {ErrorMessage}", userMail, ex.Message);
             }
         }
 
         public class EventRegistrationDto
         {
-            public string? EventId { get; set; }
+            public Guid EventId { get; set; }
             public string? UserId { get; set; }
             public string? Action { get; set; }
         }
