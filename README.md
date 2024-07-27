@@ -28,6 +28,7 @@ The following configuration settings are required in your local.settings.json or
     "GraphTenantId": "<Azure_AD_Tenant_ID>",
     "GraphClientSecret": "<Azure_AD_Client_Secret>",
     "FromEmail": "<Email_Address_For_Sending_Emails>"
+    "SendGridApiKey": "<Send-Grid-API-Key>"
   }
 }
 ```
